@@ -1,0 +1,60 @@
+---
+title: "Untitled"
+author: "Mazen Alhaffar"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+health2 = read.csv('/Users/mazenalhaffar/Documents/Business Analytics/Data Driven Decision Making & Optimization/Data Driven Project/OUData_cleaned_standardized.csv')
+health2 <- health2[,c(-1,-3,-4,-5,-6,-7,-9)]
+```
+
+```{r}
+distance = dist(health2, method = "euclidean")
+health2.std = sapply(health2, scale)
+distance.std= dist(health2.std, method = "euclidean")
+```
+
+```{r}
+######## K-means clustering ########
+set.seed(123)
+K = 4
+kmClustering = kmeans(health2.std, centers = K) #center is the number of clusters we want
+
+# show cluster membership
+kmClustering$cluster
+
+# Cluster statistics
+kmClustering$centers
+kmClustering$size
+hClustering = hclust(distance.std, method = "ward")
+```
+
+```{r}
+# Plot an empty scatter plot
+plot(c(0), xaxt = 'n', ylab = "", type = "l", 
+     ylim = c(min(kmClustering$centers), max(kmClustering$centers)), 
+     xlim = c(0, length(names(health2))))
+
+# Label x-axes with all variable names from the dataset
+axis(1, at = c(1:length(names(health2))), labels = names(health2), las = 2, cex.axis = 0.8)
+
+# Plot centroids for each cluster
+for (i in 1:K) {
+  lines(kmClustering$centers[i,], lty = i, lwd = 2, col = ifelse(i %% 2 == 1, "black", "dark grey"))
+}
+
+# Name the clusters on the plot
+text(x = 0.5, y = kmClustering$centers[, 1], labels = paste("Cluster", 1:K))
+
+# Adjust the margins to make space for the labels below
+par(mar = c(5, 4, 4, 8))  # Increase right margin (4th value) to give space to x-axis labels
+
+```
+
+```{r}
+library(factoextra)
+fviz_nbclust(health2.std, FUNcluster = kmeans, method = "wss")
+```
+

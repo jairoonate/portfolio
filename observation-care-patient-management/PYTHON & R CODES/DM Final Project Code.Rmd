@@ -1,0 +1,676 @@
+---
+title: "DM Project- Logistic"
+author: "Jun Ming Li"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Libraries used
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(rpart)
+library(randomForest)
+library(readxl)
+```
+
+
+#Look at the data
+```{r}
+#Load the dataset
+ou_data <- read.csv("OUData_cleaned_NONstandardized.csv")
+summary(ou_data)
+str(ou_data)
+head(ou_data)
+```
+
+
+
+#format data
+```{r}
+
+# format variables
+
+
+## remove unnecessary variables
+ou_data <- ou_data %>% dplyr::select(-c(ObservationRecordKey,InitPatientClassAndFirstPostOUClass,GenderMale,OU_LOS_hrs))
+# These variables are removed for the following reasons:
+# ObservationRecordKey: This is just an identifier key
+# InitPatientClassAndFirstPostOUClass: redundant with the Flipped status 
+# GenderMale: We use the original gender category
+# OU_LOS_hrs: We want to add to the OU exclusion list and bypass placing any flip patients into the OU ward, so basing it off how many hours they will spent in the OU defeats the purpose of this analysis. 
+
+
+#convert True = 1 and False = 0
+ou_data$Gender <- ifelse(ou_data$Gender=='Female', 1,0) #Male = 0, Female = 1
+
+
+
+## define categorical variables
+ou_data$Gender <- as.factor(ou_data$Gender)
+ou_data$PrimaryInsuranceCategory <- as.factor(ou_data$PrimaryInsuranceCategory)
+ou_data$DRG01 <- as.factor(ou_data$DRG01)
+ou_data$Flipped <- as.factor(ou_data$Flipped) # 0 = No Flipped, 1= Flipped
+# ou_data$GenderMale <-as.factor(ou_data$GenderMale) #Male = True, Female = False
+
+
+
+ou_data
+head(ou_data)
+str(ou_data)
+```
+
+
+#EDA 
+```{r}
+
+# # Subset the numerical and categorical variables
+numeric_var <- ou_data %>% dplyr::select(where(is.numeric))
+num_names   <- names(numeric_var)
+cat_var     <- ou_data %>% dplyr::select(-num_names)
+# 
+# 
+# # create frequency charts for all numerical var
+#   for (var in names(numeric_var)) {
+#     print(ggplot(numeric_var, aes(x = numeric_var[[var]])) +
+#     geom_histogram() +
+#     labs(title = paste("Histogram of", var), x = var) )
+# }
+# 
+# 
+# # create bar charts for all cat var
+#   for (var in names(cat_var)) {
+#     print(ggplot(numeric_var, aes(x = cat_var[[var]])) +
+#     geom_bar() +
+#     labs(title = paste("Histogram of", var), x = var))
+# }
+# 
+
+
+
+# Nearly 50/50 for flipped
+# Most Insurance was Medicare and Medicare Other (Do we combine these medicares together?)
+# About 450/1111 Males
+
+
+corr
+
+
+```
+
+
+# Prepare Data for Analysis
+## Outlier
+```{r}
+
+# # use boxplots to find outlier
+#   for (var in names(numeric_var)) {
+#     print(ggplot(numeric_var, aes(y = numeric_var[[var]])) +
+#     geom_boxplot() +
+#     labs(title = paste("Histogram of", var), y = var) )
+# }
+
+
+
+# remove additional outliers from the logistic residual plots
+for (col in names(numeric_var)) {
+  x <- numeric_var[[col]]
+  
+  # Calculate Q1, Q3, and IQR
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_value <- IQR(x, na.rm = TRUE)
+  
+  # Define lower and upper bounds for outliers
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+
+  # Identify outlier indices
+  outlier_indices <- which(x < lower_bound | x > upper_bound)
+  
+    # Print the results
+  cat("Column:", col, "\n")
+  cat("Lower bound:", lower_bound, "\n")
+  cat("Upper bound:", upper_bound, "\n")
+  cat("Outlier values:\n")
+  print(x[outlier_indices])
+  cat("\n---------------------\n")
+}
+
+#Additional outliers from residual plots
+# rows 210, 188, 173, and 312 from original run
+
+
+# ou_data<-ou_data[-c(210,188,173,312),]
+ou_data <- ou_data[-outlier_indices,]
+
+
+#################################INDEXES TO REMOVE JAIRO!!!!!!#################################################
+###############################################################################################################
+###############################################################################################################
+outlier_indices
+
+```
+
+
+
+
+## Partition data
+
+```{r}
+
+set.seed(123)
+
+# Partition data into training (70%) and testing (30%) data sets
+
+# create a sample of indexes
+ou_data.rows <- nrow(ou_data)
+ou_data.index <- sample(ou_data.rows, .7*ou_data.rows)
+
+# create datasets using above randomly chosen indexes
+ou_data.train <- ou_data[ou_data.index,]
+ou_data.test  <- ou_data[-ou_data.index,]
+
+# confirm the total number of rows matches the above
+nrow(ou_data.test) + nrow(ou_data.train)
+
+
+```
+
+
+
+## Balance the data (Before commiting to this, check the histogram of the Flipped data so that we can confirm it is imbalanced or not)
+
+```{r}
+
+# str(ou_data.train)
+
+table(ou_data.train$Flipped)
+table(ou_data.train$Flipped)/nrow(ou_data.train)
+
+#      0      1 
+#   903996  85594 
+#  91.3%      8.7%
+
+
+# 0 = no payment difficulties (this is the reference leve1)
+# 1 = client with payment difficulties: he/she had late payment more than X days on at least one of the first Y installments of the loan in our sample
+
+
+
+library(ROSE)
+
+# balanced data set with over-sampling
+# We are taking the minority class, and oversampling it. 
+ou_data.train.balanced.over <- ovun.sample(Flipped ~ ., data=ou_data.train, p=0.5, method= "under")
+ou_data.train.balanced.over <- ou_data.train.balanced.over$data
+
+
+# Save the balanced dataset
+
+ou_data.train <- ou_data.train.balanced.over
+(table(ou_data.train.balanced.over$Flipped)) / nrow(ou_data.train)
+```
+
+
+
+
+
+## Scale the Train Dataset
+
+```{r}
+### Using Z-score
+
+str(ou_data.train)
+
+# Standardize input variables
+
+# # create function to divide the days into year
+# divide365 <- function(x, na.rm = FALSE) round((x/365),2)
+
+# create scaling function
+myscale <- function(x) (x - mean(x)) / sd(x)
+
+
+# # Measure variable in days
+# ou_data.train <- ou_data.train %>% mutate(across(colnames(ou_data.train %>% dplyr::select(contains('DAYS'))),divide365))
+
+ou_data.train <- ou_data.train %>% mutate(across(colnames(ou_data.train %>% dplyr::select(is.numeric)), myscale))
+
+
+# str(ou_data)
+
+
+```
+
+
+
+
+## Scale the Test Dataset
+
+```{r}
+### Using Z-score
+
+str(ou_data.test)
+
+# Standardize input variables
+
+# # create function to divide the days into year
+# divide365 <- function(x, na.rm = FALSE) round((x/365),2)
+
+# creating my own scaling function because the R one produces errors when trying to predict or create a LM 
+myscale <- function(x) (x - mean(x)) / sd(x)
+
+
+# 
+# # Measure variable in days
+# ou_data.test <- ou_data.test %>% mutate(across(colnames(ou_data.test %>% dplyr::select(contains('DAYS'))),divide365))
+
+ou_data.test <- ou_data.test %>% mutate(across(colnames(ou_data.test %>% dplyr::select(is.numeric)), myscale))
+
+# str(ou_data)
+
+
+```
+
+
+#Logistic Model
+
+```{r}
+
+
+
+logit.reg.all <- glm(Flipped ~., data =  ou_data.train, family = 'binomial')
+summary(logit.reg.all)
+
+# Look to see if there are potential outliers
+# plot(logit.reg.all)
+
+# rows 210, 188, 173, and 312
+
+```
+
+
+
+# Accuracy with full model
+
+```{r}
+
+
+# General probabilities from logit model
+predicted.test.prob <- predict(logit.reg.all, newdata=ou_data.test, type = "response")
+
+
+# We need to consider what the reference level of our Flipped variable.
+ou_data.test$Flipped <- as.factor(ou_data.test$Flipped)
+ou_data.train$Flipped <- as.factor(ou_data.train$Flipped)
+# The reference level is 0, meaning they didn't default. 
+
+levels(ou_data.test$Flipped)
+
+# Use cutoff point of 0.5 to convert probabilities to class
+predicted.test.class <- ifelse(predicted.test.prob > 0.5, "1", "0")
+
+
+
+# Generating a confusion matrix
+library(caret)
+confusionMatrix(data = as.factor(predicted.test.class), reference = ou_data.test$Flipped)
+
+
+# sensitivity is the accuracy of predicting the positive class. 
+# specificity is the accuracy of predicting the negative class. 
+
+
+
+# Checking the AUC
+library(pROC)
+roc = roc(ou_data.test$Flipped, predicted.test.prob)
+auc(roc)
+plot(roc)
+
+
+
+```
+
+
+
+
+
+```{r}
+names(ou_data)
+```
+
+
+# Forward Selection Model
+
+```{r}
+# Define base intercept only model
+model.null <- glm(Flipped ~1, data =  ou_data.train, family = 'binomial')
+
+
+# Full model with all predictors
+model.full <- logit.reg.all
+
+library(MASS)
+
+
+# Perform forward algorithm
+reduced.forward.model <- stepAIC(model.null, scope =list(lower = model.null, upper = model.full), direction = "forward", trace = FALSE)
+
+forwardmodelsaved <- reduced.forward.model
+summary(forwardmodelsaved)
+
+```
+
+
+
+
+# Accuracy with Forward selection 
+
+```{r}
+
+# General probabilities from logit model
+predicted.test.prob <- predict(forwardmodelsaved, newdata=ou_data.test, type = "response")
+
+
+# We need to consider what the reference level of our Flipped variable.
+ou_data.test$Flipped <- as.factor(ou_data.test$Flipped)
+ou_data.train$Flipped <- as.factor(ou_data.train$Flipped)
+# The reference level is 0, meaning they didn't default. 
+
+levels(ou_data.test$Flipped)
+
+# Use cutoff point of 0.5 to convert probabilities to class
+predicted.test.class <- ifelse(predicted.test.prob > 0.5, "1", "0")
+
+
+
+# Generating a confusion matrix
+library(caret)
+confusionMatrix(data = as.factor(predicted.test.class), reference = ou_data.test$Flipped)
+
+
+# sensitivity is the accuracy of predicting the positive class. 
+# specificity is the accuracy of predicting the negative class. 
+
+
+
+# Checking the AUC
+library(pROC)
+roc = roc(ou_data.test$Flipped, predicted.test.prob)
+auc(roc)
+plot(roc)
+
+```
+
+
+
+
+
+
+# Self selection Model
+
+glm(formula = Flipped ~ OU_LOS_hrs + DRG01 + PrimaryInsuranceCategory + 
+    BloodPressureLower + Gender, family = "binomial", data = ou_data.train)
+    
+    
+    [1] "Age"                      "Gender"                   "PrimaryInsuranceCategory"
+ [4] "Flipped"                  "OU_LOS_hrs"               "DRG01"                   
+ [7] "BloodPressureUpper"       "BloodPressureLower"       "BloodPressureDiff"       
+[10] "Pulse"                    "PulseOximetry"            "Respirations"            
+[13] "Temperature"    
+
+```{r}
+
+
+
+# It seems that from the above models, DRG, Insurance, and OU_LOS_hrs are the most significant variables. We will also add gender to this list to determine if there is a gender bias as well. 
+
+
+# From forward model
+# glm(formula = Flipped ~ OU_LOS_hrs + DRG01 + PrimaryInsuranceCategory + 
+#     Age + Temperature, family = "binomial", data = ou_data.train)
+
+
+
+
+logit.reg.selfselect <- glm(Flipped ~ Gender + DRG01 + PrimaryInsuranceCategory + BloodPressureLower, data =  ou_data.train, family = 'binomial')
+summary(logit.reg.selfselect)
+
+```
+
+
+
+
+
+
+
+# Accuracy with  Self selection 
+```{r}
+
+
+# General probabilities from logit model
+predicted.test.prob <- predict(logit.reg.selfselect, newdata=ou_data.test, type = "response")
+
+
+# We need to consider what the reference level of our Flipped variable.
+ou_data.test$Flipped <- as.factor(ou_data.test$Flipped)
+ou_data.train$Flipped <- as.factor(ou_data.train$Flipped)
+# The reference level is 0, meaning they didn't default. 
+
+levels(ou_data.test$Flipped)
+
+# Use cutoff point of 0.5 to convert probabilities to class
+predicted.test.class <- ifelse(predicted.test.prob > 0.5, "1", "0")
+
+
+
+# Generating a confusion matrix
+library(caret)
+confusionMatrix(data = as.factor(predicted.test.class), reference = ou_data.test$Flipped)
+
+
+# sensitivity is the accuracy of predicting the positive class. 
+# specificity is the accuracy of predicting the negative class. 
+
+
+
+# Checking the AUC
+library(pROC)
+roc = roc(ou_data.test$Flipped, predicted.test.prob)
+auc(roc)
+plot(roc)
+
+```
+
+
+
+
+
+
+# Code to export final probabilities from logistic regression
+
+```{r}
+
+#install.packages("writexl")
+
+library(writexl)
+saveRDS(logit.reg.selfselect, file = "logistic_reg_results.rds")
+
+data <- readRDS("logistic_reg_results.rds")
+
+head(data,1)
+
+predicted_values <- data.frame(data$fitted.values)
+
+write_xlsx(predicted_values, 'logistic_reg_predicted_results.xlsx')
+
+
+# Downloading the training dataset 
+write_xlsx(ou_data.train, 'training_dataset.xlsx')
+
+```
+
+
+
+
+
+
+# Random Forest, mtry=3
+
+```{r}
+# Load required library
+library(randomForest)
+
+# Define target variable
+target <- 'Flipped'
+
+# Select features
+features <- c('Age', 'DRG01', 'BloodPressureUpper', 'BloodPressureLower', 
+              'BloodPressureDiff', 'Pulse', 'PulseOximetry', 'Respirations', 'Temperature')
+
+set.seed(42)
+
+# Train the Random Forest model
+rf_model <- randomForest(ou_data.train$Flipped ~ ., data = ou_data.train, ntree = 100, mtry = 3, importance = TRUE)
+
+# Make predictions
+y_pred <- predict(rf_model, newdata = ou_data.test)
+
+# Evaluate the model
+confusionMatrix(y_pred, ou_data.test$Flipped)
+```
+
+Positive Class 0 is for not flipped
+
+
+
+```{r}
+# Checking the AUC RF model
+library(pROC)
+
+# Compute AUC
+roc_curve <- roc(as.numeric(ou_data.test$Flipped), as.numeric(y_pred))
+auc_value <- auc(roc_curve)
+
+# Print AUC
+print(paste("AUC:", round(auc_value, 4)))
+
+# Plot ROC curve
+plot(roc_curve, main = "ROC Curve - Random Forest")
+```
+
+
+
+## Changing mtry
+
+### Random Forest, mtry=4
+```{r}
+set.seed(42)
+
+# Train the Random Forest model
+rf_model <- randomForest(ou_data.train$Flipped ~ ., data = ou_data.train, ntree = 100, mtry = 4, importance = TRUE)
+
+# Make predictions
+y_pred <- predict(rf_model, newdata = ou_data.test)
+
+# Evaluate the model
+confusionMatrix(y_pred, ou_data.test$Flipped)
+```
+
+
+
+```{r}
+# Checking the AUC RF model
+library(pROC)
+
+# Compute AUC
+roc_curve <- roc(as.numeric(ou_data.test$Flipped), as.numeric(y_pred))
+auc_value <- auc(roc_curve)
+
+# Print AUC
+print(paste("AUC:", round(auc_value, 4)))
+
+# Plot ROC curve
+plot(roc_curve, main = "ROC Curve - Random Forest")
+```
+
+
+
+
+### Random Forest, mtry=5
+
+```{r}
+set.seed(42)
+
+# Train the Random Forest model
+rf_model <- randomForest(ou_data.train$Flipped ~ ., data = ou_data.train, ntree = 100, mtry = 5, importance = TRUE)
+
+# Make predictions
+y_pred <- predict(rf_model, newdata = ou_data.test)
+
+# Evaluate the model
+confusionMatrix(y_pred, ou_data.test$Flipped)
+```
+
+
+```{r}
+# Checking the AUC RF model
+library(pROC)
+
+# Compute AUC
+roc_curve <- roc(as.numeric(ou_data.test$Flipped), as.numeric(y_pred))
+auc_value <- auc(roc_curve)
+
+# Print AUC
+print(paste("AUC:", round(auc_value, 4)))
+
+# Plot ROC curve
+plot(roc_curve, main = "ROC Curve - Random Forest")
+```
+
+
+
+
+### Random Forest, mtry=6
+```{r}
+set.seed(42)
+
+# Train the Random Forest model
+rf_model <- randomForest(ou_data.train$Flipped ~ ., data = ou_data.train, ntree = 100, mtry = 6, importance = TRUE)
+
+# Make predictions
+y_pred <- predict(rf_model, newdata = ou_data.test)
+
+# Evaluate the model
+confusionMatrix(y_pred, ou_data.test$Flipped)
+```
+
+
+
+```{r}
+# Checking the AUC RF model
+library(pROC)
+
+# Compute AUC
+roc_curve <- roc(as.numeric(ou_data.test$Flipped), as.numeric(y_pred))
+auc_value <- auc(roc_curve)
+
+# Print AUC
+print(paste("AUC:", round(auc_value, 4)))
+
+# Plot ROC curve
+plot(roc_curve, main = "ROC Curve - Random Forest")
+```
+
+
+
+
